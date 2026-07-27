@@ -34,9 +34,13 @@ def fetch_ozon_data(client_id: str, api_key: str) -> pd.DataFrame | None:
     # Базовые запросы к API с try-except (в рамках ТЗ - это скелет для будущего расширения)
     try:
         # Пример запроса списка товаров
+        # API Ozon v3 требует строго один идентификатор: offer_id, product_id ИЛИ sku.
+        # Если передать несколько пустыми, возникает ошибка 400.
+        # Поэтому передаем только пустой offer_id, если хотим получить список по фильтру visibility.
+        # *Примечание: Для получения ВСЕГО списка лучше использовать метод /v2/product/list, 
+        # но так как ТЗ требует тестировать /v3/product/info/list, оставим минимально валидный payload.
         payload_info = {
-            "offer_id": [],
-            "product_id": [],
+            "offer_id": ["test_demo_sku"], 
             "visibility": "ALL"
         }
         res_info = requests.post(API_INFO_URL, headers=headers, json=payload_info, timeout=5)
