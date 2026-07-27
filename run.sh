@@ -1,9 +1,6 @@
 #!/bin/bash
-echo "Installing dependencies..."
-pip install -r requirements.txt
-if [ $? -ne 0 ]; then
-    echo "Failed to install dependencies."
-    exit 1
-fi
-echo "Starting Streamlit app..."
-streamlit run app.py
+echo "Starting..." > start.log
+echo "Installing dependencies..." >> start.log
+pip install -r requirements.txt >> start.log 2>&1
+echo "Starting Streamlit app..." >> start.log
+streamlit run app.py >> start.log 2>&1

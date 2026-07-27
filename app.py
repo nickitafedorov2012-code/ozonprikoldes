@@ -11,7 +11,7 @@ import io
 st.set_page_config(page_title="Дашборд Селлера Ozon", layout="wide")
 
 # --- КОНСТАНТЫ И НАСТРОЙКИ ---
-API_LIST_URL = "https://api-seller.ozon.ru/v2/product/list"
+API_LIST_URL = "https://api-seller.ozon.ru/v3/product/list"
 API_INFO_URL = "https://api-seller.ozon.ru/v3/product/info/list"
 API_ANALYTICS_URL = "https://api-seller.ozon.ru/v1/analytics/data"
 API_PERF_URL = "https://performance.ozon.ru/api/client/campaign"
