@@ -11,16 +11,18 @@ import io
 st.set_page_config(page_title="Дашборд Селлера Ozon", layout="wide")
 
 # --- КОНСТАНТЫ И НАСТРОЙКИ ---
+API_LIST_URL = "https://api-seller.ozon.ru/v2/product/list"
 API_INFO_URL = "https://api-seller.ozon.ru/v3/product/info/list"
 API_ANALYTICS_URL = "https://api-seller.ozon.ru/v1/analytics/data"
 API_PERF_URL = "https://performance.ozon.ru/api/client/campaign"
 
 
 # --- ФУНКЦИИ ПОЛУЧЕНИЯ ДАННЫХ ---
-def fetch_ozon_data(client_id: str, api_key: str) -> pd.DataFrame | None:
+def fetch_ozon_data(client_id: str, api_key: str) -> dict | None:
     """
     Получает реальные данные из API Ozon. 
-    Если возникает ошибка или ключи неверны, возвращает None для fallback на демо-данные.
+    Возвращает словарь с данными (например, список реальных SKU), 
+    или None, если произошла ошибка.
     """
     if not client_id or not api_key:
         return None
@@ -31,24 +33,46 @@ def fetch_ozon_data(client_id: str, api_key: str) -> pd.DataFrame | None:
         "Content-Type": "application/json"
     }
     
-    # Базовые запросы к API с try-except (в рамках ТЗ - это скелет для будущего расширения)
     try:
-        # Пример запроса списка товаров
-        # API Ozon v3 требует строго один идентификатор: offer_id, product_id ИЛИ sku.
-        # Если передать несколько пустыми, возникает ошибка 400.
-        # Поэтому передаем только пустой offer_id, если хотим получить список по фильтру visibility.
-        # *Примечание: Для получения ВСЕГО списка лучше использовать метод /v2/product/list, 
-        # но так как ТЗ требует тестировать /v3/product/info/list, оставим минимально валидный payload.
-        payload_info = {
-            "offer_id": ["test_demo_sku"], 
-            "visibility": "ALL"
+        # 1. Сначала получаем список реальных product_id магазина
+        payload_list = {
+            "filter": {
+                "visibility": "ALL"
+            },
+            "limit": 100,
+            "last_id": "",
         }
-        res_info = requests.post(API_INFO_URL, headers=headers, json=payload_info, timeout=5)
+        res_list = requests.post(API_LIST_URL, headers=headers, json=payload_list, timeout=10)
+        res_list.raise_for_status()
+        
+        data_list = res_list.json().get('result', {})
+        items = data_list.get('items', [])
+        
+        if not items:
+            st.sidebar.success("Авторизация успешна, но у вас пока нет товаров.")
+            return {"real_skus": [], "real_names": []}
+            
+        product_ids = [item['product_id'] for item in items]
+        
+        # 2. Получаем детальную информацию по этим товарам
+        payload_info = {
+            "product_id": product_ids
+        }
+        res_info = requests.post(API_INFO_URL, headers=headers, json=payload_info, timeout=10)
         res_info.raise_for_status()
         
-        # Здесь должна быть логика объединения с API аналитики и Performance
-        # В текущем виде API без валидных ключей всегда будет падать и переходить на мок.
-        return None 
+        info_items = res_info.json().get('result', [])
+        
+        real_skus = []
+        real_names = []
+        for item in info_items:
+            real_skus.append(item.get('offer_id', f"SKU-{item.get('product_id')}"))
+            real_names.append(item.get('name', "Без названия"))
+            
+        st.sidebar.success(f"API подключено! Загружено {len(real_skus)} товаров. (Остальные метрики сгенерированы)")
+        
+        return {"real_skus": real_skus, "real_names": real_names}
+        
     except requests.exceptions.RequestException as e:
         st.sidebar.warning(f"Ошибка HTTP запроса: {e}. Включаем демо-режим.")
         if hasattr(e, 'response') and e.response is not None:
@@ -59,15 +83,19 @@ def fetch_ozon_data(client_id: str, api_key: str) -> pd.DataFrame | None:
         return None
 
 @st.cache_data
-def generate_mock_data(cost_df: pd.DataFrame | None = None) -> pd.DataFrame:
+def generate_mock_data(cost_df: pd.DataFrame | None = None, api_data: dict | None = None) -> pd.DataFrame:
     """
     Генерирует демо-данные, имитирующие ответы API. 
-    Учитывает загруженную себестоимость, если она есть.
+    Учитывает загруженную себестоимость и реальные SKU, если они есть.
     """
-    num_items = 20
-    
-    skus = [f"SKU-{random.randint(100000, 999999)}" for _ in range(num_items)]
-    names = [f"Товар {i+1} (демо)" for i in range(num_items)]
+    if api_data and api_data.get("real_skus"):
+        skus = api_data["real_skus"]
+        names = api_data["real_names"]
+        num_items = len(skus)
+    else:
+        num_items = 20
+        skus = [f"SKU-{random.randint(100000, 999999)}" for _ in range(num_items)]
+        names = [f"Товар {i+1} (демо)" for i in range(num_items)]
     
     # Генерация или подстановка себестоимости
     costs = []
@@ -400,11 +428,20 @@ def main():
                 raw_data = fetch_ozon_data(client_id, api_key)
         
         # Fallback к демо-режиму
-        if raw_data is None:
+        # Если raw_data является словарем (успешный ответ API), 
+        # нам нужно сгенерировать DataFrame на основе этих SKU (гибридный демо-режим)
+        if isinstance(raw_data, dict):
+            raw_data = generate_mock_data(cost_df, raw_data)
+        elif raw_data is None:
             if not demo_mode and (client_id or api_key):
                 st.sidebar.warning("Не удалось получить данные по API. Переход в демо-режим.")
             raw_data = generate_mock_data(cost_df)
             
+        # Если после генерации данных нет
+        if raw_data.empty:
+            st.info("Нет данных для отображения.")
+            return
+
         # Расчет метрик
         final_df = process_metrics(raw_data)
         
