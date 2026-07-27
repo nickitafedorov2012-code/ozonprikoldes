@@ -6,6 +6,7 @@ import plotly.graph_objects as go
 import requests
 import time
 import io
+import os
 import warnings
 import logging
 from logging.handlers import RotatingFileHandler
@@ -453,7 +454,12 @@ def main():
         with st.spinner("Загрузка данных из API..."):
             api_result_df = fetch_ozon_data(client_id, api_key)
         
-        if api_result_df is None or api_result_df.empty:
+        # Защита от AttributeError: проверяем, что api_result_df - это DataFrame
+        if not isinstance(api_result_df, pd.DataFrame):
+            st.warning("Нет данных из АПИ")
+            return
+            
+        if api_result_df.empty:
             st.warning("Нет данных из АПИ")
             return
             
@@ -514,6 +520,24 @@ def main():
         
         # Отображение UI
         build_ui(final_df)
+
+    # Добавление логов в сайдбар
+    st.sidebar.markdown("---")
+    with st.sidebar.expander("Логи приложения"):
+        if os.path.exists("ozon_dashboard.log"):
+            try:
+                with open("ozon_dashboard.log", "r", encoding="utf-8") as f:
+                    # Читаем последние 50 строк лога, чтобы не перегружать интерфейс
+                    lines = f.readlines()[-50:]
+                    logs_text = "".join(lines)
+                    if logs_text.strip():
+                        st.code(logs_text, language="log")
+                    else:
+                        st.write("Логи пусты.")
+            except Exception as e:
+                st.error(f"Не удалось прочитать лог-файл: {e}")
+        else:
+            st.write("Файл логов пока не создан.")
 
 if __name__ == "__main__":
     main()
