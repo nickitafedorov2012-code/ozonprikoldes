@@ -24,19 +24,18 @@ if not logger.handlers:
 
 st.set_page_config(page_title="Дашборд Селлера Ozon", layout="wide")
 
+import datetime
+
 # --- КОНСТАНТЫ И НАСТРОЙКИ ---
 API_LIST_URL = "https://api-seller.ozon.ru/v3/product/list"
 API_INFO_URL = "https://api-seller.ozon.ru/v3/product/info/list"
+API_PRICES_URL = "https://api-seller.ozon.ru/v4/product/info/prices"
+API_STOCKS_URL = "https://api-seller.ozon.ru/v2/analytics/stock_on_warehouses"
 API_ANALYTICS_URL = "https://api-seller.ozon.ru/v1/analytics/data"
-API_PERF_URL = "https://performance.ozon.ru/api/client/campaign"
 
-
-# --- ФУНКЦИИ ПОЛУЧЕНИЯ ДАННЫХ ---
-def fetch_ozon_data(client_id: str, api_key: str) -> dict | None:
+def fetch_ozon_data(client_id: str, api_key: str) -> pd.DataFrame | None:
     """
-    Получает реальные данные из API Ozon. 
-    Возвращает словарь с данными (например, список реальных SKU), 
-    или None, если произошла ошибка.
+    Получает реальные данные из API Ozon через цепочку запросов и мержит в единый DataFrame.
     """
     if not client_id or not api_key:
         return None
@@ -452,17 +451,12 @@ def main():
 
     if update_btn or True: # Отрисовываем по умолчанию
         with st.spinner("Загрузка данных из API..."):
-            api_result = fetch_ozon_data(client_id, api_key)
+            api_result_df = fetch_ozon_data(client_id, api_key)
         
-        if api_result is None or not api_result.get("real_skus"):
+        if api_result_df is None or api_result_df.empty:
             st.warning("Нет данных из АПИ")
             return
             
-        # Формируем DataFrame на основе реальных данных, без случайных значений
-        skus = api_result["real_skus"]
-        names = api_result["real_names"]
-        details = api_result.get("details", {})
-        
         # Подготовка данных себестоимости
         cost_dict = {}
         if cost_df is not None and not cost_df.empty:
@@ -487,34 +481,26 @@ def main():
             cost_df[cost_col_name] = cost_df[cost_col_name].apply(clean_price)
             cost_dict = dict(zip(cost_df[sku_col_name].astype(str).str.strip(), cost_df[cost_col_name]))
 
+        # Формируем итоговый DataFrame для расчетов, адаптируя колонки под процесс метрик
         data = []
-        for i, sku in enumerate(skus):
-            item_details = details.get(sku, {})
+        for index, row in api_result_df.iterrows():
+            sku = row['offer_id']
             cost = cost_dict.get(sku, 0.0)
             
-            price = item_details.get('price', 0.0)
-            fbo_stock = item_details.get('fbo_stock', 0)
-            comm_ozon = item_details.get('commission', 0.0)
-            
-            # Поскольку нет данных об аналитике (продажи, реклама), ставим 0
-            sales_30d = 0
-            ad_spend = 0.0
-            sales_history = [0] * 30
-
             data.append({
                 "SKU": sku,
-                "Наименование товара": item_details.get('name', names[i]),
-                "Остаток FBO": fbo_stock,
-                "Продажи за 30 дней": sales_30d,
+                "Наименование товара": row.get('name', "Без названия"),
+                "Остаток FBO": row.get('fbo_stock', 0),
+                "Продажи за 30 дней": row.get('ordered_units', 0),
                 "Закупочная цена": cost,
-                "Комиссия Ozon": comm_ozon,
-                "Логистика Ozon": 0.0, # Заглушка, так как API-логика для этого пока не реализована полностью
-                "Эквайринг": price * 0.015,
-                "Текущая цена продажи": price,
-                "Участвует в продвижении": "Нет",
+                "Комиссия Ozon": row.get('fbo_fee', 0.0),
+                "Логистика Ozon": row.get('logistics', 0.0),
+                "Эквайринг": row.get('acquiring', 0.0),
+                "Текущая цена продажи": row.get('price', 0.0),
+                "Участвует в продвижении": "Нет",  # Пока нет API рекламы
                 "ID кампании": None,
-                "Расход за месяц": ad_spend,
-                "График продаж": sales_history
+                "Расход за месяц": 0.0,
+                "График продаж": [0] * 30 # Заглушка
             })
 
         raw_data = pd.DataFrame(data)
