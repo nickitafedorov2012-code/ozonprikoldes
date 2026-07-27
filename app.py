@@ -7,6 +7,21 @@ import requests
 import time
 import random
 import io
+import warnings
+import logging
+from logging.handlers import RotatingFileHandler
+
+# Подавляем предупреждение openpyxl о стилях по умолчанию
+warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
+
+# Настраиваем логирование в файл
+logger = logging.getLogger("OzonDashboard")
+logger.setLevel(logging.INFO)
+handler = RotatingFileHandler("ozon_dashboard.log", maxBytes=1024*1024*5, backupCount=2)
+formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+handler.setFormatter(formatter)
+if not logger.handlers:
+    logger.addHandler(handler)
 
 st.set_page_config(page_title="Дашборд Селлера Ozon", layout="wide")
 
@@ -61,25 +76,39 @@ def fetch_ozon_data(client_id: str, api_key: str) -> dict | None:
         res_info = requests.post(API_INFO_URL, headers=headers, json=payload_info, timeout=10)
         res_info.raise_for_status()
         
-        info_items = res_info.json().get('result', [])
+        info_data = res_info.json().get('result', {})
+        # Ozon возвращает items списком внутри словаря
+        info_items = info_data.get('items', []) if isinstance(info_data, dict) else info_data
         
         real_skus = []
         real_names = []
-        for item in info_items:
-            real_skus.append(item.get('offer_id', f"SKU-{item.get('product_id')}"))
-            real_names.append(item.get('name', "Без названия"))
+        
+        if not info_items:
+            # Fallback: если второй запрос пустой, используем хотя бы ID из первого
+            logger.warning("Второй запрос (info/list) вернул пустой список. Используем данные первого запроса.")
+            for item in items:
+                real_skus.append(item.get('offer_id', f"SKU-{item.get('product_id')}"))
+                real_names.append(f"Товар {item.get('product_id')} (без названия)")
+        else:
+            for item in info_items:
+                real_skus.append(item.get('offer_id', f"SKU-{item.get('product_id')}"))
+                real_names.append(item.get('name', "Без названия"))
             
         st.sidebar.success(f"API подключено! Загружено {len(real_skus)} товаров. (Остальные метрики сгенерированы)")
+        logger.info(f"Успешно загружено {len(real_skus)} товаров через API")
         
         return {"real_skus": real_skus, "real_names": real_names}
         
     except requests.exceptions.RequestException as e:
         st.sidebar.warning(f"Ошибка HTTP запроса: {e}. Включаем демо-режим.")
+        err_text = getattr(e.response, 'text', 'Нет деталей')
+        logger.error(f"Ошибка HTTP: {e} - {err_text}")
         if hasattr(e, 'response') and e.response is not None:
             st.sidebar.code(f"Детали ошибки от сервера:\n{e.response.text}")
         return None
     except Exception as e:
         st.sidebar.warning(f"Внутренняя ошибка API: {e}. Включаем демо-режим.")
+        logger.error(f"Внутренняя ошибка API: {e}", exc_info=True)
         return None
 
 @st.cache_data
@@ -340,7 +369,7 @@ def build_ui(df: pd.DataFrame):
         column_config=config,
         disabled=disabled_cols,
         hide_index=True,
-        use_container_width=True,
+        width="stretch",
         height=500
     )
     
@@ -351,34 +380,39 @@ def build_ui(df: pd.DataFrame):
     with c1:
         # Круговая диаграмма (ABC): Распределение чистой прибыли по товарам (только те, что принесли прибыль > 0)
         profit_df = df[df['Чистая прибыль с 1 шт.'] > 0].copy()
-        profit_df['Общая прибыль'] = profit_df['Чистая прибыль с 1 шт.'] * (profit_df['Средние продажи в день'] * 30)
-        fig_pie = px.pie(profit_df, values='Общая прибыль', names='SKU', title='Распределение чистой прибыли по товарам (ABC)')
-        st.plotly_chart(fig_pie, use_container_width=True)
+        if not profit_df.empty:
+            profit_df['Общая прибыль'] = profit_df['Чистая прибыль с 1 шт.'] * (profit_df['Средние продажи в день'] * 30)
+            fig_pie = px.pie(profit_df, values='Общая прибыль', names='SKU', title='Распределение чистой прибыли по товарам (ABC)')
+            st.plotly_chart(fig_pie, width="stretch")
+        else:
+            st.info("Нет товаров с положительной чистой прибылью для отображения графика ABC.")
         
     with c2:
         # Точечный график (Матрица риска): X - Оборачиваемость, Y - Текущий ROI, Размер - Остаток FBO, Цвет - Статус товара
         risk_df = df.dropna(subset=['Оборачиваемость в днях', 'Текущий ROI, %']).copy()
-        # Для размера точки (остаток FBO) нужно избежать нулевых значений, иначе Plotly выдаст предупреждение/ошибку
-        risk_df['Размер_Точки'] = risk_df['Остаток FBO'].apply(lambda x: x if x > 0 else 1)
-        
-        color_map = {
-            "🟢 Отлично": "green",
-            "🟡 Внимание": "yellow",
-            "🔴 Критично": "red",
-            "⚪ Неизвестно": "gray"
-        }
-        
-        fig_scatter = px.scatter(
-            risk_df, 
-            x='Оборачиваемость в днях', 
-            y='Текущий ROI, %', 
-            size='Размер_Точки',
-            color='Статус товара',
-            color_discrete_map=color_map,
-            hover_name='SKU',
-            title='Матрица риска: Оборачиваемость vs ROI'
-        )
-        st.plotly_chart(fig_scatter, use_container_width=True)
+        if not risk_df.empty:
+            risk_df['Размер_Точки'] = risk_df['Остаток FBO'].apply(lambda x: x if x > 0 else 1)
+            
+            color_map = {
+                "🟢 Отлично": "green",
+                "🟡 Внимание": "yellow",
+                "🔴 Критично": "red",
+                "⚪ Неизвестно": "gray"
+            }
+            
+            fig_scatter = px.scatter(
+                risk_df, 
+                x='Оборачиваемость в днях', 
+                y='Текущий ROI, %', 
+                size='Размер_Точки',
+                color='Статус товара',
+                color_discrete_map=color_map,
+                hover_name='SKU',
+                title='Матрица риска: Оборачиваемость vs ROI'
+            )
+            st.plotly_chart(fig_scatter, width="stretch")
+        else:
+            st.info("Недостаточно данных для построения матрицы риска.")
         
     # Хитмап (Корреляция): Корреляционная матрица между ценой, ROI, текущим ДРР и Скорингом
     st.markdown("#### Корреляционная матрица")
@@ -392,7 +426,7 @@ def build_ui(df: pd.DataFrame):
         zmin=-1, zmax=1,
         title="Корреляция: Цена, ROI, ДРР, Скоринг"
     )
-    st.plotly_chart(fig_heatmap, use_container_width=True)
+    st.plotly_chart(fig_heatmap, width="stretch")
 
 
 # --- ТОЧКА ВХОДА ---
