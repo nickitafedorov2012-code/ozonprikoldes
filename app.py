@@ -49,50 +49,75 @@ def fetch_ozon_data(client_id: str, api_key: str) -> dict | None:
     }
     
     try:
-        # 1. Сначала получаем список реальных product_id магазина
-        payload_list = {
-            "filter": {
-                "visibility": "ALL"
-            },
-            "limit": 100,
-            "last_id": "",
-        }
-        res_list = requests.post(API_LIST_URL, headers=headers, json=payload_list, timeout=10)
-        res_list.raise_for_status()
+        # 1. Сначала получаем список всех реальных product_id магазина (с пагинацией)
+        all_product_ids = []
+        all_items_basic = []
+        last_id = ""
+        limit = 1000  # API Ozon позволяет limit до 1000 для product/list
         
-        data_list = res_list.json().get('result', {})
-        items = data_list.get('items', [])
+        while True:
+            payload_list = {
+                "filter": {
+                    "visibility": "ALL"
+                },
+                "limit": limit,
+                "last_id": last_id,
+            }
+            res_list = requests.post(API_LIST_URL, headers=headers, json=payload_list, timeout=15)
+            res_list.raise_for_status()
+            
+            data_list = res_list.json().get('result', {})
+            items = data_list.get('items', [])
+            
+            if not items:
+                break
+                
+            all_items_basic.extend(items)
+            all_product_ids.extend([item['product_id'] for item in items])
+            
+            last_id = data_list.get('last_id', "")
+            # Если last_id пустой или мы получили меньше лимита, значит это последняя страница
+            if not last_id or len(items) < limit:
+                break
         
-        if not items:
+        if not all_product_ids:
             st.sidebar.success("Авторизация успешна, но у вас пока нет товаров.")
             return {"real_skus": [], "real_names": []}
             
-        product_ids = [item['product_id'] for item in items]
-        
-        # 2. Получаем детальную информацию по этим товарам
-        payload_info = {
-            "product_id": product_ids
-        }
-        res_info = requests.post(API_INFO_URL, headers=headers, json=payload_info, timeout=10)
-        res_info.raise_for_status()
-        
-        info_data = res_info.json().get('result', {})
-        # Ozon возвращает items списком внутри словаря
-        info_items = info_data.get('items', []) if isinstance(info_data, dict) else info_data
-        
+        # 2. Получаем детальную информацию по этим товарам (батчами)
+        # Ozon info/list рекомендует передавать не более 100 ID за раз
+        chunk_size = 100
         real_skus = []
         real_names = []
         
-        if not info_items:
-            # Fallback: если второй запрос пустой, используем хотя бы ID из первого
-            logger.warning("Второй запрос (info/list) вернул пустой список. Используем данные первого запроса.")
-            for item in items:
-                real_skus.append(item.get('offer_id', f"SKU-{item.get('product_id')}"))
-                real_names.append(f"Товар {item.get('product_id')} (без названия)")
-        else:
-            for item in info_items:
-                real_skus.append(item.get('offer_id', f"SKU-{item.get('product_id')}"))
-                real_names.append(item.get('name', "Без названия"))
+        for i in range(0, len(all_product_ids), chunk_size):
+            chunk_ids = all_product_ids[i:i + chunk_size]
+            payload_info = {
+                "product_id": chunk_ids
+            }
+            try:
+                res_info = requests.post(API_INFO_URL, headers=headers, json=payload_info, timeout=15)
+                res_info.raise_for_status()
+                
+                info_data = res_info.json().get('result', {})
+                info_items = info_data.get('items', []) if isinstance(info_data, dict) else info_data
+                
+                if info_items:
+                    for item in info_items:
+                        real_skus.append(item.get('offer_id', f"SKU-{item.get('product_id')}"))
+                        real_names.append(item.get('name', "Без названия"))
+            except Exception as e:
+                logger.error(f"Ошибка при загрузке чанка {i}: {e}")
+                # Если детальки не загрузились, используем fallback
+                continue
+                
+        # Fallback для тех товаров, которые не смогли получить детальную инфу
+        if len(real_skus) < len(all_product_ids):
+            loaded_ids = set([s.replace("SKU-", "") for s in real_skus]) # Приближенный сеттинг
+            for item in all_items_basic:
+                if str(item['product_id']) not in loaded_ids and item.get('offer_id') not in real_skus:
+                    real_skus.append(item.get('offer_id', f"SKU-{item.get('product_id')}"))
+                    real_names.append(f"Товар {item.get('product_id')} (без названия)")
             
         st.sidebar.success(f"API подключено! Загружено {len(real_skus)} товаров. (Остальные метрики сгенерированы)")
         logger.info(f"Успешно загружено {len(real_skus)} товаров через API")
