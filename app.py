@@ -104,25 +104,71 @@ def fetch_ozon_data(client_id: str, api_key: str) -> dict | None:
                 
                 if info_items:
                     for item in info_items:
-                        real_skus.append(item.get('offer_id', f"SKU-{item.get('product_id')}"))
+                        # Извлекаем подробные данные
+                        sku = item.get('offer_id', f"SKU-{item.get('product_id')}")
+                        real_skus.append(sku)
                         real_names.append(item.get('name', "Без названия"))
+                        
+                        # Парсинг цены
+                        price_str = item.get('price', "0")
+                        try:
+                            price = float(price_str)
+                        except:
+                            price = 0.0
+                            
+                        # Парсинг остатков (stocks) - часто в v3 info/list есть массив stocks
+                        stocks = item.get('stocks', [])
+                        fbo_stock = 0
+                        if isinstance(stocks, list):
+                            for stock_info in stocks:
+                                if stock_info.get('has_stock'):
+                                    fbo_stock += int(stock_info.get('present', 0))
+                        
+                        # Парсинг комиссий (если отдаются)
+                        commissions = item.get('commissions', {})
+                        fbo_comm = 0.0
+                        if isinstance(commissions, dict):
+                            fbo_comm = float(commissions.get('fbo_deliv_to_customer_amount', 0)) + float(commissions.get('sales_percent_fbo', 0))
+
+                        # Сохраняем в dict
+                        item_data = {
+                            "name": item.get('name', "Без названия"),
+                            "price": price,
+                            "fbo_stock": fbo_stock,
+                            "commission": fbo_comm
+                        }
+                        # Используем общий словарь в raw_data для хранения деталей
+                        if 'details' not in locals():
+                            details = {}
+                        details[sku] = item_data
+                        
             except Exception as e:
                 logger.error(f"Ошибка при загрузке чанка {i}: {e}")
                 # Если детальки не загрузились, используем fallback
                 continue
                 
+        if 'details' not in locals():
+            details = {}
+
         # Fallback для тех товаров, которые не смогли получить детальную инфу
         if len(real_skus) < len(all_product_ids):
-            loaded_ids = set([s.replace("SKU-", "") for s in real_skus]) # Приближенный сеттинг
+            loaded_ids = set([s.replace("SKU-", "") for s in real_skus])
             for item in all_items_basic:
                 if str(item['product_id']) not in loaded_ids and item.get('offer_id') not in real_skus:
-                    real_skus.append(item.get('offer_id', f"SKU-{item.get('product_id')}"))
+                    sku = item.get('offer_id', f"SKU-{item.get('product_id')}")
+                    real_skus.append(sku)
                     real_names.append(f"Товар {item.get('product_id')} (без названия)")
+                    details[sku] = {
+                        "name": f"Товар {item.get('product_id')} (без названия)",
+                        "price": 0.0,
+                        "fbo_stock": 0,
+                        "commission": 0.0
+                    }
             
-        st.sidebar.success(f"API подключено! Загружено {len(real_skus)} товаров. (Остальные метрики сгенерированы)")
+        st.sidebar.success(f"API подключено! Загружено {len(real_skus)} товаров.")
         logger.info(f"Успешно загружено {len(real_skus)} товаров через API")
         
-        return {"real_skus": real_skus, "real_names": real_names}
+        return {"real_skus": real_skus, "real_names": real_names, "details": details}
         
     except requests.exceptions.RequestException as e:
         st.sidebar.warning(f"Ошибка HTTP запроса: {e}. Включаем демо-режим.")
@@ -142,9 +188,11 @@ def generate_mock_data(cost_df: pd.DataFrame | None = None, api_data: dict | Non
     Генерирует демо-данные, имитирующие ответы API. 
     Учитывает загруженную себестоимость и реальные SKU, если они есть.
     """
+    details = {}
     if api_data and api_data.get("real_skus"):
         skus = api_data["real_skus"]
         names = api_data["real_names"]
+        details = api_data.get("details", {})
         num_items = len(skus)
     else:
         num_items = 20
@@ -153,6 +201,7 @@ def generate_mock_data(cost_df: pd.DataFrame | None = None, api_data: dict | Non
     
     # Генерация или подстановка себестоимости
     costs = []
+    cost_dict = {}
     if cost_df is not None and not cost_df.empty:
         # Пытаемся найти колонку артикула по ключевым словам
         sku_col_name = next((col for col in cost_df.columns if 'артикул' in str(col).lower() or 'sku' in str(col).lower()), None)
@@ -180,8 +229,10 @@ def generate_mock_data(cost_df: pd.DataFrame | None = None, api_data: dict | Non
         cost_dict = dict(zip(cost_df[sku_col_name].astype(str).str.strip(), cost_df[cost_col_name]))
         
         for sku in skus:
-            if cost_dict:
-                # Берем случайную цену из загруженного файла
+            # Если SKU есть в загруженном файле, берем его цену, иначе случайную из файла
+            if sku in cost_dict:
+                costs.append(float(cost_dict[sku]))
+            elif cost_dict:
                 costs.append(random.choice(list(cost_dict.values())))
             else:
                 costs.append(random.uniform(300, 3000))
@@ -190,8 +241,26 @@ def generate_mock_data(cost_df: pd.DataFrame | None = None, api_data: dict | Non
 
     data = []
     for i in range(num_items):
+        sku = skus[i]
         cost = costs[i]
-        price = cost * random.uniform(1.8, 3.5)
+        
+        # Берем реальные детали, если они есть
+        item_details = details.get(sku, {})
+        
+        # Если API отдал реальную цену > 0, используем её. Иначе мокаем.
+        real_price = item_details.get('price', 0)
+        price = real_price if real_price > 0 else cost * random.uniform(1.8, 3.5)
+        
+        # Реальные остатки (если не было в API, мокаем)
+        fbo_stock = item_details.get('fbo_stock', None)
+        if fbo_stock is None:
+            fbo_stock = random.randint(0, 1000)
+            
+        # Реальная комиссия (если отдана, иначе мокаем)
+        real_comm = item_details.get('commission', 0)
+        comm_ozon = real_comm if real_comm > 0 else price * random.uniform(0.1, 0.2)
+        
+        # Мокаем продажи и рекламу
         sales_30d = random.randint(0, 300)
         # Добавим крайний случай: продаж нет, но расход есть (для теста подсветки)
         if i == 0:
@@ -203,12 +272,12 @@ def generate_mock_data(cost_df: pd.DataFrame | None = None, api_data: dict | Non
         sales_history = [random.randint(0, int(sales_30d/30 * 2) + 1) if sales_30d > 0 else 0 for _ in range(30)]
 
         data.append({
-            "SKU": skus[i],
-            "Наименование товара": names[i],
-            "Остаток FBO": random.randint(0, 1000),
+            "SKU": sku,
+            "Наименование товара": item_details.get('name', names[i]),
+            "Остаток FBO": fbo_stock,
             "Продажи за 30 дней": sales_30d,
             "Закупочная цена": cost,
-            "Комиссия Ozon": price * random.uniform(0.1, 0.2),
+            "Комиссия Ozon": comm_ozon,
             "Логистика Ozon": random.uniform(50, 150),
             "Эквайринг": price * 0.015,
             "Текущая цена продажи": price,
@@ -382,6 +451,12 @@ def build_ui(df: pd.DataFrame):
         config[col] = st.column_config.NumberColumn(col, format="%.2f ₽")
     for col in percent_cols:
         config[col] = st.column_config.NumberColumn(col, format="%.2f %%")
+        
+    # Форматирование остальных числовых колонок
+    config['Средние продажи в день'] = st.column_config.NumberColumn("Средние продажи в день", format="%.2f")
+    config['Оборачиваемость в днях'] = st.column_config.NumberColumn("Оборачиваемость в днях", format="%.1f")
+    config['Скоринг оборачиваемости'] = st.column_config.NumberColumn("Скоринг оборачиваемости", format="%.1f")
+    config['Балл риска (0-10)'] = st.column_config.NumberColumn("Балл риска (0-10)", format="%.1f")
         
     config['График продаж'] = st.column_config.LineChartColumn("График продаж (30 дн.)")
     config['Целевой ДРР, %'] = st.column_config.NumberColumn("Целевой ДРР, %", format="%.2f %%", min_value=0.0, max_value=100.0, step=1.0)
