@@ -5,7 +5,6 @@ import plotly.express as px
 import plotly.graph_objects as go
 import requests
 import time
-import random
 import io
 import warnings
 import logging
@@ -181,114 +180,6 @@ def fetch_ozon_data(client_id: str, api_key: str) -> dict | None:
         st.sidebar.warning(f"Внутренняя ошибка API: {e}. Включаем демо-режим.")
         logger.error(f"Внутренняя ошибка API: {e}", exc_info=True)
         return None
-
-@st.cache_data
-def generate_mock_data(cost_df: pd.DataFrame | None = None, api_data: dict | None = None) -> pd.DataFrame:
-    """
-    Генерирует демо-данные, имитирующие ответы API. 
-    Учитывает загруженную себестоимость и реальные SKU, если они есть.
-    """
-    details = {}
-    if api_data and api_data.get("real_skus"):
-        skus = api_data["real_skus"]
-        names = api_data["real_names"]
-        details = api_data.get("details", {})
-        num_items = len(skus)
-    else:
-        num_items = 20
-        skus = [f"SKU-{random.randint(100000, 999999)}" for _ in range(num_items)]
-        names = [f"Товар {i+1} (демо)" for i in range(num_items)]
-    
-    # Генерация или подстановка себестоимости
-    costs = []
-    cost_dict = {}
-    if cost_df is not None and not cost_df.empty:
-        # Пытаемся найти колонку артикула по ключевым словам
-        sku_col_name = next((col for col in cost_df.columns if 'артикул' in str(col).lower() or 'sku' in str(col).lower()), None)
-        # Пытаемся найти колонку цены по ключевым словам ('закупочная', 'себестоимость')
-        cost_col_name = next((col for col in cost_df.columns if 'закупочная' in str(col).lower() or 'себестоимость' in str(col).lower()), None)
-        
-        # Если не нашли, берем 1 и 2 колонки как fallback (исходное поведение)
-        if not sku_col_name or not cost_col_name:
-             sku_col_name = cost_df.columns[0]
-             cost_col_name = cost_df.columns[1]
-
-        # Очищаем данные от нечисловых символов (например " руб", "р.", пробелы) и конвертируем во float
-        def clean_price(val):
-            try:
-                if isinstance(val, (int, float)):
-                    return float(val)
-                import re
-                val_str = str(val).replace(',', '.')
-                cleaned = re.sub(r'[^\d.]', '', val_str)
-                return float(cleaned) if cleaned else 0.0
-            except:
-                return 0.0
-
-        cost_df[cost_col_name] = cost_df[cost_col_name].apply(clean_price)
-        cost_dict = dict(zip(cost_df[sku_col_name].astype(str).str.strip(), cost_df[cost_col_name]))
-        
-        for sku in skus:
-            # Если SKU есть в загруженном файле, берем его цену, иначе случайную из файла
-            if sku in cost_dict:
-                costs.append(float(cost_dict[sku]))
-            elif cost_dict:
-                costs.append(random.choice(list(cost_dict.values())))
-            else:
-                costs.append(random.uniform(300, 3000))
-    else:
-        costs = [random.uniform(300, 3000) for _ in range(num_items)]
-
-    data = []
-    for i in range(num_items):
-        sku = skus[i]
-        cost = costs[i]
-        
-        # Берем реальные детали, если они есть
-        item_details = details.get(sku, {})
-        
-        # Если API отдал реальную цену > 0, используем её. Иначе мокаем.
-        real_price = item_details.get('price', 0)
-        price = real_price if real_price > 0 else cost * random.uniform(1.8, 3.5)
-        
-        # Реальные остатки (если не было в API, мокаем)
-        fbo_stock = item_details.get('fbo_stock', None)
-        if fbo_stock is None:
-            fbo_stock = random.randint(0, 1000)
-            
-        # Реальная комиссия (если отдана, иначе мокаем)
-        real_comm = item_details.get('commission', 0)
-        comm_ozon = real_comm if real_comm > 0 else price * random.uniform(0.1, 0.2)
-        
-        # Мокаем продажи и рекламу
-        sales_30d = random.randint(0, 300)
-        # Добавим крайний случай: продаж нет, но расход есть (для теста подсветки)
-        if i == 0:
-            sales_30d = 0
-            ad_spend = random.uniform(500, 2000)
-        else:
-            ad_spend = random.uniform(0, 5000) if random.random() > 0.3 else 0
-            
-        sales_history = [random.randint(0, int(sales_30d/30 * 2) + 1) if sales_30d > 0 else 0 for _ in range(30)]
-
-        data.append({
-            "SKU": sku,
-            "Наименование товара": item_details.get('name', names[i]),
-            "Остаток FBO": fbo_stock,
-            "Продажи за 30 дней": sales_30d,
-            "Закупочная цена": cost,
-            "Комиссия Ozon": comm_ozon,
-            "Логистика Ozon": random.uniform(50, 150),
-            "Эквайринг": price * 0.015,
-            "Текущая цена продажи": price,
-            "Участвует в продвижении": "Да" if ad_spend > 0 else "Нет",
-            "ID кампании": f"CMP-{random.randint(1000, 9999)}" if ad_spend > 0 else None,
-            "Расход за месяц": ad_spend,
-            "График продаж": sales_history
-        })
-        
-    return pd.DataFrame(data)
-
 
 # --- РАСЧЕТ МЕТРИК ---
 def process_metrics(raw_df: pd.DataFrame) -> pd.DataFrame:
@@ -539,7 +430,6 @@ def main():
     
     cost_file = st.sidebar.file_uploader("Файл себестоимости (CSV/Excel)", type=["csv", "xlsx"])
     
-    demo_mode = st.sidebar.toggle("Демо-режим", value=True)
     update_btn = st.sidebar.button("Обновить данные")
     
     # Обработка файла себестоимости
@@ -556,22 +446,79 @@ def main():
     # Получение или генерация данных
     raw_data = None
     
+    if not client_id or not api_key:
+        st.info("Введите Client ID и API Key для загрузки данных из Ozon.")
+        return
+
     if update_btn or True: # Отрисовываем по умолчанию
-        if not demo_mode and client_id and api_key:
-            with st.spinner("Загрузка данных из API..."):
-                raw_data = fetch_ozon_data(client_id, api_key)
+        with st.spinner("Загрузка данных из API..."):
+            api_result = fetch_ozon_data(client_id, api_key)
         
-        # Fallback к демо-режиму
-        # Если raw_data является словарем (успешный ответ API), 
-        # нам нужно сгенерировать DataFrame на основе этих SKU (гибридный демо-режим)
-        if isinstance(raw_data, dict):
-            raw_data = generate_mock_data(cost_df, raw_data)
-        elif raw_data is None:
-            if not demo_mode and (client_id or api_key):
-                st.sidebar.warning("Не удалось получить данные по API. Переход в демо-режим.")
-            raw_data = generate_mock_data(cost_df)
+        if api_result is None or not api_result.get("real_skus"):
+            st.warning("Нет данных из АПИ")
+            return
             
-        # Если после генерации данных нет
+        # Формируем DataFrame на основе реальных данных, без случайных значений
+        skus = api_result["real_skus"]
+        names = api_result["real_names"]
+        details = api_result.get("details", {})
+        
+        # Подготовка данных себестоимости
+        cost_dict = {}
+        if cost_df is not None and not cost_df.empty:
+            sku_col_name = next((col for col in cost_df.columns if 'артикул' in str(col).lower() or 'sku' in str(col).lower()), None)
+            cost_col_name = next((col for col in cost_df.columns if 'закупочная' in str(col).lower() or 'себестоимость' in str(col).lower()), None)
+            
+            if not sku_col_name or not cost_col_name:
+                 sku_col_name = cost_df.columns[0]
+                 cost_col_name = cost_df.columns[1]
+
+            def clean_price(val):
+                try:
+                    if isinstance(val, (int, float)):
+                        return float(val)
+                    import re
+                    val_str = str(val).replace(',', '.')
+                    cleaned = re.sub(r'[^\d.]', '', val_str)
+                    return float(cleaned) if cleaned else 0.0
+                except:
+                    return 0.0
+
+            cost_df[cost_col_name] = cost_df[cost_col_name].apply(clean_price)
+            cost_dict = dict(zip(cost_df[sku_col_name].astype(str).str.strip(), cost_df[cost_col_name]))
+
+        data = []
+        for i, sku in enumerate(skus):
+            item_details = details.get(sku, {})
+            cost = cost_dict.get(sku, 0.0)
+            
+            price = item_details.get('price', 0.0)
+            fbo_stock = item_details.get('fbo_stock', 0)
+            comm_ozon = item_details.get('commission', 0.0)
+            
+            # Поскольку нет данных об аналитике (продажи, реклама), ставим 0
+            sales_30d = 0
+            ad_spend = 0.0
+            sales_history = [0] * 30
+
+            data.append({
+                "SKU": sku,
+                "Наименование товара": item_details.get('name', names[i]),
+                "Остаток FBO": fbo_stock,
+                "Продажи за 30 дней": sales_30d,
+                "Закупочная цена": cost,
+                "Комиссия Ozon": comm_ozon,
+                "Логистика Ozon": 0.0, # Заглушка, так как API-логика для этого пока не реализована полностью
+                "Эквайринг": price * 0.015,
+                "Текущая цена продажи": price,
+                "Участвует в продвижении": "Нет",
+                "ID кампании": None,
+                "Расход за месяц": ad_spend,
+                "График продаж": sales_history
+            })
+
+        raw_data = pd.DataFrame(data)
+        
         if raw_data.empty:
             st.info("Нет данных для отображения.")
             return
