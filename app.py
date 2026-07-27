@@ -37,20 +37,21 @@ def fetch_ozon_data(client_id: str, api_key: str) -> pd.DataFrame | None:
         payload_info = {
             "offer_id": [],
             "product_id": [],
-            "sku": []
+            "visibility": "ALL"
         }
         res_info = requests.post(API_INFO_URL, headers=headers, json=payload_info, timeout=5)
         res_info.raise_for_status()
         
         # Здесь должна быть логика объединения с API аналитики и Performance
-        # Так как реальных данных нет, если запрос прошел успешно, 
-        # все равно пока возвращаем None, чтобы система сгенерировала демо, 
-        # либо можно попытаться спарсить. В текущем виде API без валидных ключей 
-        # всегда будет падать и переходить на мок.
-        
+        # В текущем виде API без валидных ключей всегда будет падать и переходить на мок.
         return None 
+    except requests.exceptions.RequestException as e:
+        st.sidebar.warning(f"Ошибка HTTP запроса: {e}. Включаем демо-режим.")
+        if hasattr(e, 'response') and e.response is not None:
+            st.sidebar.code(f"Детали ошибки от сервера:\n{e.response.text}")
+        return None
     except Exception as e:
-        st.sidebar.warning(f"Ошибка API: {e}. Включаем демо-режим.")
+        st.sidebar.warning(f"Внутренняя ошибка API: {e}. Включаем демо-режим.")
         return None
 
 @st.cache_data
@@ -67,14 +68,35 @@ def generate_mock_data(cost_df: pd.DataFrame | None = None) -> pd.DataFrame:
     # Генерация или подстановка себестоимости
     costs = []
     if cost_df is not None and not cost_df.empty:
-        # Предполагаем, что 1 колонка SKU, 2 колонка Закупочная цена
-        sku_col = cost_df.columns[0]
-        cost_col = cost_df.columns[1]
-        cost_dict = dict(zip(cost_df[sku_col].astype(str), cost_df[cost_col]))
+        # Пытаемся найти колонку артикула по ключевым словам
+        sku_col_name = next((col for col in cost_df.columns if 'артикул' in str(col).lower() or 'sku' in str(col).lower()), None)
+        # Пытаемся найти колонку цены по ключевым словам ('закупочная', 'себестоимость')
+        cost_col_name = next((col for col in cost_df.columns if 'закупочная' in str(col).lower() or 'себестоимость' in str(col).lower()), None)
+        
+        # Если не нашли, берем 1 и 2 колонки как fallback (исходное поведение)
+        if not sku_col_name or not cost_col_name:
+             sku_col_name = cost_df.columns[0]
+             cost_col_name = cost_df.columns[1]
+
+        # Очищаем данные от нечисловых символов (например " руб", "р.", пробелы) и конвертируем во float
+        def clean_price(val):
+            try:
+                if isinstance(val, (int, float)):
+                    return float(val)
+                import re
+                val_str = str(val).replace(',', '.')
+                cleaned = re.sub(r'[^\d.]', '', val_str)
+                return float(cleaned) if cleaned else 0.0
+            except:
+                return 0.0
+
+        cost_df[cost_col_name] = cost_df[cost_col_name].apply(clean_price)
+        cost_dict = dict(zip(cost_df[sku_col_name].astype(str).str.strip(), cost_df[cost_col_name]))
         
         for sku in skus:
-            if sku in cost_dict:
-                costs.append(float(cost_dict[sku]))
+            if cost_dict:
+                # Берем случайную цену из загруженного файла
+                costs.append(random.choice(list(cost_dict.values())))
             else:
                 costs.append(random.uniform(300, 3000))
     else:
